@@ -191,6 +191,11 @@ ENDO_LV = "dsurf2"
 ENDO_RV = "dsurf5"
 ENDO_LA = "dsurf6"
 ENDO_RA = "dsurf7"
+EPICARDIUM = "dsurf1"
+VALVE_MITRAL = "dsurf9"
+VALVE_TRICUSPID = "dsurf10"
+VALVE_AORTIC = "dsurf11"
+VALVE_PULMONARY = "dsurf12"
 DIRICHLET = "dsurf20"
 
 
@@ -213,14 +218,25 @@ def main():
                         help=f"LA endocardial surface (default: {ENDO_LA})")
     parser.add_argument("--endo-ra", default=ENDO_RA,
                         help=f"RA endocardial surface (default: {ENDO_RA})")
+    parser.add_argument("--epicardium", default=EPICARDIUM,
+                        help=f"Epicardial surface (default: {EPICARDIUM})")
+    parser.add_argument("--valve-mitral", default=VALVE_MITRAL,
+                        help=f"Mitral valve ring surface (default: {VALVE_MITRAL})")
+    parser.add_argument("--valve-tricuspid", default=VALVE_TRICUSPID,
+                        help=f"Tricuspid valve ring surface (default: {VALVE_TRICUSPID})")
+    parser.add_argument("--valve-aortic", default=VALVE_AORTIC,
+                        help=f"Aortic valve ring surface (default: {VALVE_AORTIC})")
+    parser.add_argument("--valve-pulmonary", default=VALVE_PULMONARY,
+                        help=f"Pulmonary valve ring surface (default: {VALVE_PULMONARY})")
     parser.add_argument("--dirichlet", default=DIRICHLET,
                         help=f"Dirichlet BC surface (default: {DIRICHLET})")
     parser.add_argument("--fiber-key", default="node-fiber1",
                         help="Point data key for fiber direction (default: node-fiber1)")
     parser.add_argument("--fiber-key2", default="node-fiber2",
                         help="Point data key for second fiber family (default: node-fiber2)")
-    parser.add_argument("--material", type=int, nargs="*", default=None,
-                        help="Restrict to specific volume material IDs (default: all)")
+    parser.add_argument("--material", type=int, nargs="*", default=[1],
+                        help="Restrict to specific volume material IDs (default: [1] = LV). "
+                             "Pass --material with no values to keep all materials.")
     parser.add_argument("--output", default="mesh_data",
                         help="Output file base name (default: mesh_data)")
     args = parser.parse_args()
@@ -245,11 +261,23 @@ def main():
     ET = tet_block.data
     tet_mat = mesh.cell_data["element-material"][0].flatten()
 
-    if args.material is not None:
+    if args.material:
         mask = np.isin(tet_mat, args.material)
         ET = ET[mask]
         tet_mat = tet_mat[mask]
-        print(f"  Filtered to materials {args.material}: {ET.shape[0]} elements")
+        print(f"\nFiltering to materials {args.material}: {ET.shape[0]} elements")
+
+        # Subset nodes to those used by the filtered elements and remap
+        # connectivity so all downstream extraction (boundary faces, dsurf
+        # surfaces, BC nodes, fibers) is restricted to this geometry.
+        used_nodes = np.unique(ET)
+        node_map = -np.ones(VT.shape[0], dtype=np.int64)
+        node_map[used_nodes] = np.arange(used_nodes.size)
+        ET = node_map[ET]
+        VT = VT[used_nodes]
+        mesh.points = VT
+        mesh.point_data = {k: v[used_nodes] for k, v in mesh.point_data.items()}
+        print(f"  Retained {VT.shape[0]} of {node_map.size} nodes")
 
     print(f"\nNodes (VT): {VT.shape}")
     print(f"Elements (ET): {ET.shape}")
@@ -262,19 +290,51 @@ def main():
     print(f"  Total boundary faces: {len(boundary)}")
 
     # ------------------------------------------------------------------
-    # Pressure surfaces (one per chamber)
+    # Pressure surfaces (one per chamber). Empty surfaces are dropped.
     # ------------------------------------------------------------------
     print("\nIdentifying endocardial (pressure) surfaces ...")
-    F_pressure_lv = get_surface_faces(mesh, ET, boundary, args.endo_lv)
-    F_pressure_rv = get_surface_faces(mesh, ET, boundary, args.endo_rv)
-    F_pressure_la = get_surface_faces(mesh, ET, boundary, args.endo_la)
-    F_pressure_ra = get_surface_faces(mesh, ET, boundary, args.endo_ra)
+    pressure_specs = [
+        ("F_pressure_lv", args.endo_lv, "LV"),
+        ("F_pressure_rv", args.endo_rv, "RV"),
+        ("F_pressure_la", args.endo_la, "LA"),
+        ("F_pressure_ra", args.endo_ra, "RA"),
+    ]
+    pressure_faces = {}
+    for var_name, surf_name, label in pressure_specs:
+        f = get_surface_faces(mesh, ET, boundary, surf_name)
+        if f.shape[0] > 0:
+            pressure_faces[var_name] = (f, surf_name, label)
+        else:
+            print(f"    -> dropped (no faces in this geometry)")
 
     # ------------------------------------------------------------------
-    # Dirichlet BC nodes (external tissue)
+    # Other named surfaces: epicardium and valve rings. Dropped if empty.
+    # ------------------------------------------------------------------
+    print("\nIdentifying epicardium and valve-ring surfaces ...")
+    extra_specs = [
+        ("F_epicardium",      args.epicardium,      "epicardium"),
+        ("F_valve_mitral",    args.valve_mitral,    "mitral valve ring"),
+        ("F_valve_tricuspid", args.valve_tricuspid, "tricuspid valve ring"),
+        ("F_valve_aortic",    args.valve_aortic,    "aortic valve ring"),
+        ("F_valve_pulmonary", args.valve_pulmonary, "pulmonary valve ring"),
+    ]
+
+    extra_faces = {}
+    for var_name, surf_name, label in extra_specs:
+        f = get_surface_faces(mesh, ET, boundary, surf_name)
+        if f.shape[0] > 0:
+            extra_faces[var_name] = (f, surf_name, label)
+        else:
+            print(f"    -> dropped (no faces in this geometry)")
+
+    # ------------------------------------------------------------------
+    # Dirichlet BC nodes (external tissue). Dropped if empty.
     # ------------------------------------------------------------------
     print("\nIdentifying Dirichlet BC nodes ...")
     bcSupportList = get_bc_nodes(mesh, args.dirichlet)
+    if bcSupportList.size == 0:
+        print(f"    -> dropped (no Dirichlet nodes in this geometry)")
+        bcSupportList = None
 
     # ------------------------------------------------------------------
     # Fiber directions at integration points
@@ -297,11 +357,12 @@ def main():
     print("=" * 65)
     print(f"  VT             : {VT.shape}           (node coordinates)")
     print(f"  ET             : {ET.shape}      (tet10 connectivity)")
-    print(f"  F_pressure_lv  : {F_pressure_lv.shape}        (LV endocardial faces, {args.endo_lv})")
-    print(f"  F_pressure_rv  : {F_pressure_rv.shape}        (RV endocardial faces, {args.endo_rv})")
-    print(f"  F_pressure_la  : {F_pressure_la.shape}        (LA endocardial faces, {args.endo_la})")
-    print(f"  F_pressure_ra  : {F_pressure_ra.shape}        (RA endocardial faces, {args.endo_ra})")
-    print(f"  bcSupportList  : {bcSupportList.shape}        (Dirichlet BC nodes, {args.dirichlet})")
+    for var_name, (f, surf_name, label) in pressure_faces.items():
+        print(f"  {var_name:18s} : {f.shape}        ({label} endocardial faces, {surf_name})")
+    for var_name, (f, surf_name, label) in extra_faces.items():
+        print(f"  {var_name:18s} : {f.shape}        ({label} faces, {surf_name})")
+    if bcSupportList is not None:
+        print(f"  bcSupportList  : {bcSupportList.shape}        (Dirichlet BC nodes, {args.dirichlet})")
     print(f"  fiber_dir_IP   : {fiber_dir_IP.shape}  (fiber1 at 4 GP)")
     if fiber_dir_IP2 is not None:
         print(f"  fiber_dir_IP2  : {fiber_dir_IP2.shape}  (fiber2 at 4 GP)")
@@ -315,17 +376,18 @@ def main():
     save_dict = dict(
         VT=VT,
         ET=ET,
-        F_pressure_lv=F_pressure_lv,
-        F_pressure_rv=F_pressure_rv,
-        F_pressure_la=F_pressure_la,
-        F_pressure_ra=F_pressure_ra,
-        bcSupportList=bcSupportList,
         fiber_dir_IP=fiber_dir_IP,
         pos_IP=pos_IP,
         element_material=tet_mat,
         gauss_points=GAUSS_TET4,
         gauss_weights=GAUSS_W4,
     )
+    for var_name, (f, _, _) in pressure_faces.items():
+        save_dict[var_name] = f
+    for var_name, (f, _, _) in extra_faces.items():
+        save_dict[var_name] = f
+    if bcSupportList is not None:
+        save_dict["bcSupportList"] = bcSupportList
     if fiber_dir_IP2 is not None:
         save_dict["fiber_dir_IP2"] = fiber_dir_IP2
     np.savez(npz_path, **save_dict)
@@ -339,17 +401,18 @@ def main():
         mat_dict = dict(
             VT=VT,
             ET=ET + 1,
-            F_pressure_lv=F_pressure_lv + 1,
-            F_pressure_rv=F_pressure_rv + 1,
-            F_pressure_la=F_pressure_la + 1,
-            F_pressure_ra=F_pressure_ra + 1,
-            bcSupportList=bcSupportList + 1,
             fiber_dir_IP=fiber_dir_IP,
             pos_IP=pos_IP,
             element_material=tet_mat,
             gauss_points=GAUSS_TET4,
             gauss_weights=GAUSS_W4,
         )
+        for var_name, (f, _, _) in pressure_faces.items():
+            mat_dict[var_name] = f + 1
+        for var_name, (f, _, _) in extra_faces.items():
+            mat_dict[var_name] = f + 1
+        if bcSupportList is not None:
+            mat_dict["bcSupportList"] = bcSupportList + 1
         if fiber_dir_IP2 is not None:
             mat_dict["fiber_dir_IP2"] = fiber_dir_IP2
         mat_path = args.output + ".mat"
