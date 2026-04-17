@@ -235,7 +235,7 @@ def main():
     parser.add_argument("--fiber-key2", default="node-fiber2",
                         help="Point data key for second fiber family (default: node-fiber2)")
     parser.add_argument("--material", type=int, nargs="*", default=[1],
-                        help="Restrict to specific volume material IDs (default: [1] = LV). "
+                        help="Restrict to specific volume material IDs (default: [1] = biventricular myocardium, LV+RV). "
                              "Pass --material with no values to keep all materials.")
     parser.add_argument("--output", default="mesh_data",
                         help="Output file base name (default: mesh_data)")
